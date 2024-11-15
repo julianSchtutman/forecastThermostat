@@ -2,6 +2,10 @@
 #include <WiFiManager.h>
 #include <ESP8266HTTPClient.h> 
 #include <ArduinoJson.h>
+#include <InfluxDbClient.h>
+#include <InfluxDbCloud.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
 
 #define MAX_TEMPERATURES 48
 
@@ -10,10 +14,21 @@
 #define TEMP_THRESHOLD_ALWAYS_ON 10
 #define TEMP_THRESHOLD_ALWAYS_OFF 22
 
+#define DEVICE "ESP8266"
+#define INFLUXDB_URL "http://64.227.117.215:8086"
+#define INFLUXDB_TOKEN "Vq8yr2dIKNtFB0g39S4tQP0lcCkzNUAeA_XzZA3gwExDdXNRML6FyrGMcG5pMbgpqSCf4SM5R1wljMWKWYq1Hg=="
+#define INFLUXDB_ORG "ed1eda531d831a2f"
+#define INFLUXDB_BUCKET "thermostat"
+#define TZ_INFO "UTC-3"
+
 
 WiFiClient client;
 int actualHour;
 bool heaterOn;
+InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN, InfluxDbCloud2CACert);
+Point sensor("Thermostat_TMY");  
+float temperatures[MAX_TEMPERATURES];
+WiFiUDP ntpUDP;
 
 typedef struct{
   float temp0;
@@ -47,7 +62,7 @@ typedef struct{
 }TelemetryPack_t;
 
 void setup() {
-  String datetime;
+  int getHour;
   // Initialize serial port with baud rate of 9600 and 8N1 configuration
   Serial.begin(9600, SERIAL_8N1);
   
@@ -65,16 +80,33 @@ void setup() {
       //if you get here you have connected to the WiFi    
       Serial.println("connected...yeey :)");
   }
+  
+  if(!getActualHour(getHour)){
+    Serial.printf("Error getting time from web");
+    ESP.restart();
+  }
+  
+  actualHour = getHour;
 
-  if(!getDateTime(datetime)){
-    Serial.printf("Error getting datetime from web");
+  // Check influx server connection
+  if (influxClient.validateConnection()) {
+    Serial.print("Connected to InfluxDB: ");
+    Serial.println(influxClient.getServerUrl());
+  } else {
+    Serial.print("InfluxDB connection failed: ");
+    Serial.println(influxClient.getLastErrorMessage());
     return;
   }
-  actualHour = (String(datetime).substring(11, 13)).toInt();;
 
   if(!turnHeaterOn()){
     Serial.printf("Error turning heater on");
     return; 
+  }
+
+  //getForecast
+  if(!getForecast(temperatures)){
+    Serial.printf("Error getting forecast from web");
+    return;
   }
 
 }
@@ -84,22 +116,17 @@ void loop() {
   String datetime;
   TelemetryPack_t tmy;
   
-  static float temperatures[MAX_TEMPERATURES];
-  static int dutyCycle;
+  
+  static int dutyCycle = 100;
   static unsigned long turnOnTime = millis();
     
-  if(!getDateTime(datetime)){
-    Serial.printf("Error getting datetime from web");
+  if(!getActualHour(newHour)){
+    Serial.printf("Error getting time from web");
     return;
   }
-  newHour = (String(datetime).substring(11, 13)).toInt();
-
-  // Imprimir la hora obtenida
-  Serial.print(F("New hour: "));
-  Serial.println(newHour);
 
   if(newHour != actualHour){
-    
+    Serial.printf("Cambio de hora! \n");
     actualHour = newHour;
     //apagar caldera
 
@@ -111,8 +138,8 @@ void loop() {
 
     dutyCycle = calcDutyCycle(temperatures[actualHour + FUTURE_TEMP_HS]);
     Serial.printf("DutyCycle: %d \n", dutyCycle);
-    turnOnTime = millis() + (dutyCycle * 100 / (3600 * 1000));
-    Serial.printf("Turning on in: %d ms", (dutyCycle * 100 / (3600 * 1000)));
+    turnOnTime = millis() + 3600000 - (dutyCycle * (3600 * 1000) / 100);
+    Serial.printf("Turning on in: %d ms", 3600000 - (dutyCycle * (3600 * 1000) /100));
 
     if(!turnHeaterOff()){
       Serial.printf("Error turning heater off");
@@ -158,9 +185,11 @@ void loop() {
   tmy.temp22 = temperatures[actualHour + 22];
   tmy.temp23 = temperatures[actualHour + 23];
   
-  sendToInflux(tmy);
+  if(!sendToInflux(tmy)){
+    Serial.printf("Error writing in influx");
+  }
   
-  delay(60000); //sleep 5 minutes
+  delay(10000); //sleep 5 minutes
 
 }
 
@@ -172,35 +201,29 @@ int calcDutyCycle(float futureTemp){
 }
 
 
-bool getDateTime(String& datetime){
-    String url = "http://worldtimeapi.org/api/timezone/America/Argentina/Salta";
-    HTTPClient http;
-    int httpCode;
-    String payload;
-    
-    http.begin(client, url);
-    httpCode = http.GET();
-    
-    if (httpCode > 0) {
-      payload = http.getString();
-    }else{
-      Serial.printf("Error geting actual time - code: %d ",httpCode);
-      http.end();
-      return false;
+bool getActualHour(int& hour) {
+    NTPClient timeClient(ntpUDP, "pool.ntp.org", -3 * 3600, 60000);  // -3*3600 para Argentina (UTC-3)
+    timeClient.begin();
+
+    // Intentar actualizar el tiempo
+    if (!timeClient.update()) {
+        return false;  // Falló la actualización del tiempo
     }
 
-    DynamicJsonDocument doc(500);
-    DeserializationError error = deserializeJson(doc, payload);
-
-    if (error) {
-      Serial.print(F("deserializeJson() for date/time failed: "));
-      Serial.println(error.f_str());
-      http.end();
-      return false;
+    String datetime = timeClient.getFormattedTime();
+    
+    // Validar el formato y extraer la hora
+    if (datetime.length() < 2) {
+        return false;  // Formato inesperado
+    }
+    
+    hour = datetime.substring(0, 2).toInt();
+    
+    // Validar que la hora esté en un rango válido
+    if (hour < 0 || hour > 23) {
+        return false;
     }
 
-    datetime = doc["datetime"].as<String>();
-    http.end();
     return true;
 }
 
@@ -236,10 +259,12 @@ bool getForecast(float* forecast){
     JsonArray temperaturas = doc2["hourly"]["temperature_2m"];
     
     size_t i = 0;
-  
+
     for (float temperatura : temperaturas) {
       if (i < MAX_TEMPERATURES) {
-        forecast[i++] = temperatura;
+        forecast[i] = temperatura;
+        printf("i:%d temp:%f \n",i, temperatura);
+        i++; 
        }
       else {
       break; 
@@ -250,7 +275,54 @@ bool getForecast(float* forecast){
     return true;
 }
 
-bool sendToInflux(TelemetryPack_t tmy){
+bool sendToInflux(TelemetryPack_t telemetria){
+  sensor.clearFields();
+  sensor.addField("temp_0", telemetria.temp0);
+  sensor.addField("temp_1", telemetria.temp1);
+  sensor.addField("temp_2", telemetria.temp2);
+  sensor.addField("temp_3", telemetria.temp3);
+  sensor.addField("temp_4", telemetria.temp4);
+  sensor.addField("temp_5", telemetria.temp5);
+  sensor.addField("temp_6", telemetria.temp6);
+  sensor.addField("temp_7", telemetria.temp7);
+  sensor.addField("temp_8", telemetria.temp8);
+  sensor.addField("temp_9", telemetria.temp9);
+  sensor.addField("temp_10", telemetria.temp10);
+  sensor.addField("temp_11", telemetria.temp11);
+  sensor.addField("temp_12", telemetria.temp12);
+  sensor.addField("temp_13", telemetria.temp13);
+  sensor.addField("temp_14", telemetria.temp14);
+  sensor.addField("temp_15", telemetria.temp15);
+  sensor.addField("temp_16", telemetria.temp16);
+  sensor.addField("temp_17", telemetria.temp17);
+  sensor.addField("temp_18", telemetria.temp18);
+  sensor.addField("temp_19", telemetria.temp19);
+  sensor.addField("temp_20", telemetria.temp20);
+  sensor.addField("temp_21", telemetria.temp21);
+  sensor.addField("temp_22", telemetria.temp22);
+  sensor.addField("temp_23", telemetria.temp23);
+  sensor.addField("actual_hour", telemetria.actualHour);
+  sensor.addField("actual_duty_cycle", telemetria.actualDutyCycle);
+  sensor.addField("future_temp", telemetria.futureTemp);
+  if(telemetria.heaterOn){
+    sensor.addField("heater_state", "Encendida");
+    sensor.addField("heater_on", 1);  
+  }else{
+    sensor.addField("heater_state", "Apagada");
+    sensor.addField("heater_on", 0);  
+  }
+  
+
+  // Print what are we exactly writing
+  //Serial.print("Writing: ");
+  //Serial.println(sensor.toLineProtocol());
+
+  // Write point
+  if (!influxClient.writePoint(sensor)) {
+    Serial.print("InfluxDB write failed: ");
+    Serial.println(influxClient.getLastErrorMessage());
+    return false;
+  }
   return true;
 }
 
