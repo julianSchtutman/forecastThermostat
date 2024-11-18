@@ -29,60 +29,61 @@ InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXD
 Point sensor("Thermostat_TMY");  
 float temperatures[MAX_TEMPERATURES];
 WiFiUDP ntpUDP;
+const unsigned long reconnectInterval = 60000; 
+const int maxReconnectAttempts = 30;
+const int pinCaldera = 5;
+String lastError;
 
 typedef struct{
-  float temp0;
-  float temp1;
-  float temp2;
-  float temp3;
-  float temp4;
-  float temp5;
-  float temp6;
-  float temp7;
-  float temp8;
-  float temp9;
-  float temp10;
-  float temp11;
-  float temp12;
-  float temp13;
-  float temp14;
-  float temp15;
-  float temp16;
-  float temp17;
-  float temp18;
-  float temp19;
-  float temp20;
-  float temp21;
-  float temp22;
-  float temp23;
   int actualHour;
   int actualDutyCycle;
   float futureTemp;
+  float actualTemp;
   bool heaterOn;
+  String lastError;
+  unsigned long uptime;
 }TelemetryPack_t;
 
 void setup() {
   int getHour;
   // Initialize serial port with baud rate of 9600 and 8N1 configuration
   Serial.begin(9600, SERIAL_8N1);
-  
+  lastError = "None";
   WiFiManager wm;
   bool res;
+
+  pinMode(pinCaldera, OUTPUT);
+
+  if(!turnHeaterOn()){
+    Serial.printf("Error turning heater on");
+    return;   }
 
   //CONNECT TO WIFI
   res = wm.autoConnect("Termostato","password"); // password protected ap
 
   if(!res) {
       Serial.println("Failed to connect");
-      // ESP.restart();
+      ESP.restart();
   } 
   else {
       //if you get here you have connected to the WiFi    
       Serial.println("connected...yeey :)");
   }
   
+  //codigo de debub para encontrar hora erronea
+  //while(1){
+  //  if(!getActualHour(getHour)){
+  //    Serial.printf("Error getting time from web");
+  //    ESP.restart();
+  //  }
+  //  Serial.printf("La hora es %d \n", getHour);
+  //  delay(10000); 
+  // }
+
+  
   if(!getActualHour(getHour)){
     Serial.printf("Error getting time from web");
+    delay(600000); 
     ESP.restart();
   }
   
@@ -95,18 +96,15 @@ void setup() {
   } else {
     Serial.print("InfluxDB connection failed: ");
     Serial.println(influxClient.getLastErrorMessage());
-    return;
-  }
-
-  if(!turnHeaterOn()){
-    Serial.printf("Error turning heater on");
-    return; 
+    delay(600000); 
+    ESP.restart();
   }
 
   //getForecast
   if(!getForecast(temperatures)){
     Serial.printf("Error getting forecast from web");
-    return;
+    delay(600000); 
+    ESP.restart();
   }
 
 }
@@ -115,25 +113,27 @@ void loop() {
   int newHour;
   String datetime;
   TelemetryPack_t tmy;
-  
-  
   static int dutyCycle = 100;
   static unsigned long turnOnTime = millis();
     
+  checkWiFiAndReconnect();
+
   if(!getActualHour(newHour)){
     Serial.printf("Error getting time from web");
-    return;
+    lastError = "Error getting hour - " + String(int(millis()/1000));
+    ESP.restart();
   }
 
   if(newHour != actualHour){
-    Serial.printf("Cambio de hora! \n");
+    Serial.printf("Cambio de hora! hora actual %d - hora nueva %d \n", actualHour, newHour);
+    
     actualHour = newHour;
-    //apagar caldera
 
     //getForecast
     if(!getForecast(temperatures)){
       Serial.printf("Error getting forecast from web");
-      return;
+      lastError = "Error getting forecast - " + String(int(millis()/1000));
+      ESP.restart();
     }
 
     dutyCycle = calcDutyCycle(temperatures[actualHour + FUTURE_TEMP_HS]);
@@ -143,7 +143,8 @@ void loop() {
 
     if(!turnHeaterOff()){
       Serial.printf("Error turning heater off");
-      return; 
+      lastError = "Error turning heater off - " + String(int(millis()/1000));
+      ESP.restart();
     }
 
   } 
@@ -151,8 +152,9 @@ void loop() {
   if((millis() > turnOnTime) && !heaterOn){
       if(!turnHeaterOn()){
         Serial.printf("Error turning heater on");
-        return; 
-    }
+        lastError = "Error turning heater on - " + String(int(millis()/1000));
+        ESP.restart();
+      }
   }
 
   //fill telemetry
@@ -160,36 +162,16 @@ void loop() {
   tmy.actualHour = actualHour;
   tmy.futureTemp = temperatures[actualHour + FUTURE_TEMP_HS];
   tmy.heaterOn = heaterOn;
-  tmy.temp0 = temperatures[actualHour];
-  tmy.temp1 = temperatures[actualHour + 1];
-  tmy.temp2 = temperatures[actualHour + 2];
-  tmy.temp3 = temperatures[actualHour + 3];
-  tmy.temp4 = temperatures[actualHour + 4];
-  tmy.temp5 = temperatures[actualHour + 5];
-  tmy.temp6 = temperatures[actualHour + 6];
-  tmy.temp7 = temperatures[actualHour + 7];
-  tmy.temp8 = temperatures[actualHour + 8];
-  tmy.temp9 = temperatures[actualHour + 9];
-  tmy.temp10 = temperatures[actualHour + 10];
-  tmy.temp11 = temperatures[actualHour + 11];
-  tmy.temp12 = temperatures[actualHour + 12];
-  tmy.temp13 = temperatures[actualHour + 13];
-  tmy.temp14 = temperatures[actualHour + 14];
-  tmy.temp15 = temperatures[actualHour + 15];
-  tmy.temp16 = temperatures[actualHour + 16];
-  tmy.temp17 = temperatures[actualHour + 17];
-  tmy.temp18 = temperatures[actualHour + 18];
-  tmy.temp19 = temperatures[actualHour + 19];
-  tmy.temp20 = temperatures[actualHour + 20];
-  tmy.temp21 = temperatures[actualHour + 21];
-  tmy.temp22 = temperatures[actualHour + 22];
-  tmy.temp23 = temperatures[actualHour + 23];
-  
+  tmy.lastError = lastError;
+  tmy.uptime = millis()/1000;
+  tmy.actualTemp= temperatures[actualHour];
+    
   if(!sendToInflux(tmy)){
     Serial.printf("Error writing in influx");
+    lastError = "Error sending tmy";
   }
-  
-  delay(10000); //sleep 5 minutes
+
+  delay(60000); //sleep 5 minutes
 
 }
 
@@ -202,29 +184,35 @@ int calcDutyCycle(float futureTemp){
 
 
 bool getActualHour(int& hour) {
-    NTPClient timeClient(ntpUDP, "pool.ntp.org", -3 * 3600, 60000);  // -3*3600 para Argentina (UTC-3)
+    //NTPClient timeClient(ntpUDP, "pool.ntp.org", -3 * 3600, 60000);  // -3*3600 para Argentina (UTC-3)
+    NTPClient timeClient(ntpUDP, "time.google.com", -3 * 3600, 60000);
     timeClient.begin();
 
-    // Intentar actualizar el tiempo
-    if (!timeClient.update()) {
-        return false;  // Falló la actualización del tiempo
+    const int maxAttempts = 10; // Máximo número de reintentos
+    const unsigned long retryDelay = 2000; // Tiempo entre reintentos (ms)
+    
+    // Intentar actualizar el tiempo con reintentos
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (timeClient.update()) {
+            String datetime = timeClient.getFormattedTime();
+            // Validar el formato y extraer la hora
+            if (datetime.length() >= 2) {
+                hour = datetime.substring(0, 2).toInt();
+
+                // Validar que la hora esté en un rango válido
+                if (hour >= 0 && hour <= 23) {
+                    return true;  // Éxito
+                }
+            }
+
+            return false;  // Formato inesperado o valor fuera de rango
+        }
+
+        Serial.printf("Intento %d de %d fallido, reintentando...\n", attempt, maxAttempts);
+        delay(retryDelay);  // Esperar antes de reintentar
     }
 
-    String datetime = timeClient.getFormattedTime();
-    
-    // Validar el formato y extraer la hora
-    if (datetime.length() < 2) {
-        return false;  // Formato inesperado
-    }
-    
-    hour = datetime.substring(0, 2).toInt();
-    
-    // Validar que la hora esté en un rango válido
-    if (hour < 0 || hour > 23) {
-        return false;
-    }
-
-    return true;
+    return false;  // Todos los intentos fallaron
 }
 
 bool getForecast(float* forecast){
@@ -263,7 +251,6 @@ bool getForecast(float* forecast){
     for (float temperatura : temperaturas) {
       if (i < MAX_TEMPERATURES) {
         forecast[i] = temperatura;
-        printf("i:%d temp:%f \n",i, temperatura);
         i++; 
        }
       else {
@@ -277,33 +264,10 @@ bool getForecast(float* forecast){
 
 bool sendToInflux(TelemetryPack_t telemetria){
   sensor.clearFields();
-  sensor.addField("temp_0", telemetria.temp0);
-  sensor.addField("temp_1", telemetria.temp1);
-  sensor.addField("temp_2", telemetria.temp2);
-  sensor.addField("temp_3", telemetria.temp3);
-  sensor.addField("temp_4", telemetria.temp4);
-  sensor.addField("temp_5", telemetria.temp5);
-  sensor.addField("temp_6", telemetria.temp6);
-  sensor.addField("temp_7", telemetria.temp7);
-  sensor.addField("temp_8", telemetria.temp8);
-  sensor.addField("temp_9", telemetria.temp9);
-  sensor.addField("temp_10", telemetria.temp10);
-  sensor.addField("temp_11", telemetria.temp11);
-  sensor.addField("temp_12", telemetria.temp12);
-  sensor.addField("temp_13", telemetria.temp13);
-  sensor.addField("temp_14", telemetria.temp14);
-  sensor.addField("temp_15", telemetria.temp15);
-  sensor.addField("temp_16", telemetria.temp16);
-  sensor.addField("temp_17", telemetria.temp17);
-  sensor.addField("temp_18", telemetria.temp18);
-  sensor.addField("temp_19", telemetria.temp19);
-  sensor.addField("temp_20", telemetria.temp20);
-  sensor.addField("temp_21", telemetria.temp21);
-  sensor.addField("temp_22", telemetria.temp22);
-  sensor.addField("temp_23", telemetria.temp23);
   sensor.addField("actual_hour", telemetria.actualHour);
   sensor.addField("actual_duty_cycle", telemetria.actualDutyCycle);
   sensor.addField("future_temp", telemetria.futureTemp);
+  sensor.addField("actual_temp", telemetria.actualTemp);
   if(telemetria.heaterOn){
     sensor.addField("heater_state", "Encendida");
     sensor.addField("heater_on", 1);  
@@ -311,6 +275,8 @@ bool sendToInflux(TelemetryPack_t telemetria){
     sensor.addField("heater_state", "Apagada");
     sensor.addField("heater_on", 0);  
   }
+  sensor.addField("lastError", telemetria.lastError);
+  sensor.addField("uptime", telemetria.uptime);
   
 
   // Print what are we exactly writing
@@ -328,10 +294,38 @@ bool sendToInflux(TelemetryPack_t telemetria){
 
 bool turnHeaterOn(){
   heaterOn = true;
+  Serial.print("Prendiendo caldera - ");
+  Serial.println(int(millis() / 1000));
+  digitalWrite(pinCaldera, LOW);
   return true;
 }
 
 bool turnHeaterOff(){
   heaterOn = false;
+  Serial.print("Apagando caldera - ");
+  Serial.println(int(millis() / 1000));
+  digitalWrite(pinCaldera, HIGH);
   return true;
+}
+
+void checkWiFiAndReconnect() {
+  int reconnectAttempts = 0; 
+
+  if (WiFi.status() != WL_CONNECTED){
+      // Bloquear hasta que se reconecte o se alcancen los intentos máximos
+      while (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Wi-Fi desconectado. Intentando reconectar...");
+        WiFi.reconnect(); // Intentar reconectar
+    
+        reconnectAttempts++;
+        if (reconnectAttempts > maxReconnectAttempts) {
+          Serial.println("Máximo número de intentos alcanzado. Reiniciando...");
+          ESP.restart(); // Reiniciar el ESP
+        }
+    
+        delay(reconnectInterval); // Esperar antes del próximo intento
+      }
+    
+      Serial.println("Reconexión exitosa!");
+  }
 }
