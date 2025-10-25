@@ -10,9 +10,9 @@
 #define MAX_TEMPERATURES 48
 
 #define MAX_DUTY_CYCLE 80
-#define FUTURE_TEMP_HS 12
-#define TEMP_THRESHOLD_ALWAYS_ON 10
-#define TEMP_THRESHOLD_ALWAYS_OFF 22
+#define FUTURE_TEMP_HS 6
+#define TEMP_THRESHOLD_ALWAYS_ON 6
+#define TEMP_THRESHOLD_ALWAYS_OFF 20
 
 #define DEVICE "ESP8266"
 #define INFLUXDB_URL "http://64.227.117.215:8086"
@@ -29,7 +29,7 @@ InfluxDBClient influxClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXD
 Point sensor("Thermostat_TMY");  
 float temperatures[MAX_TEMPERATURES];
 WiFiUDP ntpUDP;
-const unsigned long reconnectInterval = 60000; 
+const unsigned long reconnectInterval = 6000; 
 const int maxReconnectAttempts = 30;
 const int pinCaldera = 5;
 String lastError;
@@ -59,10 +59,11 @@ void setup() {
     return;   }
 
   //CONNECT TO WIFI
+  wm.setConfigPortalTimeout(180);
   res = wm.autoConnect("Termostato","password"); // password protected ap
 
   if(!res) {
-      Serial.println("Failed to connect");
+      Serial.println("Failed to connect. Restarting");
       ESP.restart();
   } 
   else {
@@ -83,7 +84,7 @@ void setup() {
   
   if(!getActualHour(getHour)){
     Serial.printf("Error getting time from web");
-    delay(600000); 
+    delay(60000); 
     ESP.restart();
   }
   
@@ -96,14 +97,14 @@ void setup() {
   } else {
     Serial.print("InfluxDB connection failed: ");
     Serial.println(influxClient.getLastErrorMessage());
-    delay(600000); 
+    delay(60000); 
     ESP.restart();
   }
 
   //getForecast
   if(!getForecast(temperatures)){
     Serial.printf("Error getting forecast from web");
-    delay(600000); 
+    delay(60000); 
     ESP.restart();
   }
 
@@ -221,7 +222,7 @@ bool getForecast(float* forecast){
     String url;
     String payload;
 
-    url = "http://api.open-meteo.com/v1/forecast?latitude=-41.14&longitude=-71.4&timezone=America%2FSao_Paulo&hourly=temperature_2m&forecast_days=2";
+    url = "http://api.open-meteo.com/v1/forecast?latitude=-41.14&longitude=-71.4&timezone=America%2FArgentina%2FSalta&hourly=temperature_2m&forecast_days=2";
     http.begin(client, url);
     httpCode = http.GET();
     
@@ -232,9 +233,12 @@ bool getForecast(float* forecast){
       http.end();
       return false;
     }  
-    
-    DynamicJsonDocument doc2(1000);
-    DeserializationError error = deserializeJson(doc2, payload);
+
+    StaticJsonDocument<256> filter;
+    filter["hourly"]["temperature_2m"] = true;
+
+    DynamicJsonDocument doc2(12000);
+    DeserializationError error = deserializeJson(doc2, payload, DeserializationOption::Filter(filter));
 
     if (error) {
       Serial.print(F("deserializeJson() for forecast failed: "));
